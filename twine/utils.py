@@ -32,23 +32,11 @@ from requests_toolbelt.utils import user_agent
 import twine
 from twine import exceptions
 
-# Shim for input to allow testing.
-input_func = input
-
 DEFAULT_REPOSITORY = "https://upload.pypi.org/legacy/"
 TEST_REPOSITORY = "https://test.pypi.org/legacy/"
-
 DEFAULT_CONFIG_FILE = "~/.pypirc"
-
-# TODO: In general, it seems to be assumed that the values retrieved from
-# instances of this type aren't None, except for username and password.
-# Type annotations would be cleaner if this were Dict[str, str], but that
-# requires reworking the username/password handling, probably starting with
-# get_userpass_value.
 RepositoryConfig = Dict[str, Optional[str]]
-
 logger = logging.getLogger(__name__)
-
 
 def get_config(path: str) -> Dict[str, RepositoryConfig]:
     """Read repository configuration from a file (i.e. ~/.pypirc).
@@ -62,15 +50,18 @@ def get_config(path: str) -> Dict[str, RepositoryConfig]:
     parser = configparser.RawConfigParser()
 
     try:
-        with open(realpath, encoding="utf-8") as f:
-            parser.read_file(f)
-            logger.info(f"Using configuration from {realpath}")
+        try:
+            with open(realpath) as f:
+                parser.read_file(f)
+                logger.info(f"Using configuration from {realpath}")
+        except UnicodeDecodeError:
+            with open(realpath, encoding="utf-8") as f_utf8:
+                parser.read_file(f_utf8)
+            logger.info(f"Using configuration from {realpath} (decoded with UTF-8 fallback)")
     except FileNotFoundError:
-        # User probably set --config-file, but the file can't be read
         if path != DEFAULT_CONFIG_FILE:
             raise
 
-    # server-login is obsolete, but retained for backwards compatibility
     defaults: RepositoryConfig = {
         "username": parser.get("server-login", "username", fallback=None),
         "password": parser.get("server-login", "password", fallback=None),
@@ -83,26 +74,16 @@ def get_config(path: str) -> Dict[str, RepositoryConfig]:
         "distutils", "index-servers", fallback="pypi testpypi"
     ).split()
 
-    # Don't require users to manually configure URLs for these repositories
     config["pypi"]["repository"] = DEFAULT_REPOSITORY
     if "testpypi" in index_servers:
         config["testpypi"]["repository"] = TEST_REPOSITORY
 
-    # Optional configuration values for individual repositories
     for repository in index_servers:
-        for key in [
-            "username",
-            "repository",
-            "password",
-            "ca_cert",
-            "client_cert",
-        ]:
+        for key in ["username", "repository", "password", "ca_cert", "client_cert"]:
             if parser.has_option(repository, key):
                 config[repository][key] = parser.get(repository, key)
 
-    # Convert the defaultdict to a regular dict to prevent surprising behavior later on
     return dict(config)
-
 
 def sanitize_url(url: str) -> str:
     """Sanitize a URL.
@@ -121,11 +102,8 @@ def sanitize_url(url: str) -> str:
         return cast(str, uri.copy_with(userinfo="*" * 8).unsplit())
     return url
 
-
 def _validate_repository_url(repository_url: str) -> None:
     """Validate the given url for allowed schemes and components."""
-    # Allowed schemes are http and https, based on whether the repository
-    # supports TLS or not, and scheme and host must be present in the URL
     validator = (
         rfc3986.validators.Validator()
         .allow_schemes("http", "https")
@@ -138,14 +116,12 @@ def _validate_repository_url(repository_url: str) -> None:
             f"Invalid repository URL: {exc.args[0]}."
         )
 
-
 def get_repository_from_config(
     config_file: str,
     repository: str,
     repository_url: Optional[str] = None,
 ) -> RepositoryConfig:
     """Get repository config command-line values or the .pypirc file."""
-    # Prefer CLI `repository_url` over `repository` or .pypirc
     if repository_url:
         _validate_repository_url(repository_url)
         return _config_from_repository_url(repository_url)
@@ -156,20 +132,19 @@ def get_repository_from_config(
         raise exceptions.InvalidConfiguration(str(exc))
     except KeyError:
         raise exceptions.InvalidConfiguration(
-            f"Missing '{repository}' section from {config_file}.\n"
+            f"Missing '{repository}' section from {config_file}.
+"
             f"More info: https://packaging.python.org/specifications/pypirc/ "
         )
     except configparser.Error:
-        # NOTE: We intentionally fully mask the configparser exception here,
-        # since it could leak tokens and other sensitive values.
         raise exceptions.InvalidConfiguration(
-            f"Malformed configuration in {config_file}.\n"
+            f"Malformed configuration in {config_file}.
+"
             f"More info: https://packaging.python.org/specifications/pypirc/ "
         )
 
     config["repository"] = normalize_repository_url(cast(str, config["repository"]))
     return config
-
 
 _HOSTNAMES = {
     "pypi.python.org",
@@ -177,7 +152,6 @@ _HOSTNAMES = {
     "upload.pypi.org",
     "test.pypi.org",
 }
-
 
 def _config_from_repository_url(url: str) -> RepositoryConfig:
     parsed = urlparse(url)
@@ -191,13 +165,11 @@ def _config_from_repository_url(url: str) -> RepositoryConfig:
     config["repository"] = normalize_repository_url(cast(str, config["repository"]))
     return config
 
-
 def normalize_repository_url(url: str) -> str:
     parsed = urlparse(url)
     if parsed.netloc in _HOSTNAMES:
         return urlunparse(("https",) + parsed[1:])
     return urlunparse(parsed)
-
 
 def get_file_size(filename: str) -> str:
     """Return the size of a file in KB, or MB if >= 1024 KB."""
@@ -210,14 +182,8 @@ def get_file_size(filename: str) -> str:
 
     return f"{file_size:.1f} {size_unit}"
 
-
 def check_status_code(response: requests.Response, verbose: bool) -> None:
-    """Generate a helpful message based on the response from the repository.
-
-    Raise a custom exception for recognized errors. Otherwise, print the
-    response content (based on the verbose option) before re-raising the
-    HTTPError.
-    """
+    """Generate a helpful message based on the response from the repository."""
     if response.status_code == 410 and "pypi.python.org" in response.url:
         raise exceptions.UploadToDeprecatedPyPIDetected(
             f"It appears you're uploading to pypi.python.org (or "
@@ -226,7 +192,7 @@ def check_status_code(response: requests.Response, verbose: bool) -> None:
             f"pypi.org and test.pypi.org. Try using {DEFAULT_REPOSITORY} (or "
             f"{TEST_REPOSITORY}) to upload your packages instead. These are "
             f"the default URLs for Twine now. More at "
-            f"https://packaging.python.org/guides/migrating-to-pypi-org/."
+            f"https://packaging.python.org/guides/migrating-to-pypi-org/." 
         )
     elif response.status_code == 405 and "pypi.org" in response.url:
         raise exceptions.InvalidPyPIUploadURL(
@@ -244,9 +210,7 @@ def check_status_code(response: requests.Response, verbose: bool) -> None:
                 "Error during upload. "
                 "Retry with the --verbose option for more details."
             )
-
         raise err
-
 
 def get_userpass_value(
     cli_value: Optional[str],
@@ -254,28 +218,7 @@ def get_userpass_value(
     key: str,
     prompt_strategy: Optional[Callable[[], str]] = None,
 ) -> Optional[str]:
-    """Get a credential (e.g. a username or password) from the configuration.
-
-    Uses the following rules:
-
-    1. If ``cli_value`` is specified, use that.
-    2. If ``config[key]`` is specified, use that.
-    3. If ``prompt_strategy`` is specified, use its return value.
-    4. Otherwise return ``None``
-
-    :param cli_value:
-        The value supplied from the command line.
-    :param config:
-        A dictionary of repository configuration values.
-    :param key:
-        The credential to look up in ``config``, e.g. ``"username"`` or ``"password"``.
-    :param prompt_strategy:
-        An argumentless function to get the value, e.g. from keyring or by prompting
-        the user.
-
-    :return:
-        The credential value, i.e. the username or password.
-    """
+    """Get a credential (e.g. a username or password) from the configuration."""
     if cli_value is not None:
         logger.info(f"{key} set by command options")
         return cli_value
@@ -291,8 +234,6 @@ def get_userpass_value(
         if not value:
             warning = f"Your {key} is empty"
         elif any(unicodedata.category(c).startswith("C") for c in value):
-            # See https://www.unicode.org/reports/tr44/#General_Category_Values
-            # Most common case is "\x16" when pasting in Windows Command Prompt
             warning = f"Your {key} contains control characters"
 
         if warning:
@@ -307,13 +248,8 @@ def get_userpass_value(
     else:
         return None
 
-
-#: Get the CA bundle via :func:`get_userpass_value`.
 get_cacert = functools.partial(get_userpass_value, key="ca_cert")
-
-#: Get the client certificate via :func:`get_userpass_value`.
 get_clientcert = functools.partial(get_userpass_value, key="client_cert")
-
 
 def make_requests_session() -> requests.Session:
     """Prepare a requests Session with retries & twine's user-agent string."""
@@ -336,32 +272,18 @@ def make_requests_session() -> requests.Session:
     )
     return s
 
-
 class EnvironmentDefault(argparse.Action):
     """Get values from environment variable."""
 
-    def __init__(
-        self,
-        env: str,
-        required: bool = True,
-        default: Optional[str] = None,
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self, env: str, required: bool = True, default: Optional[str] = None, **kwargs: Any) -> None:
         default = os.environ.get(env, default)
         self.env = env
         if default:
             required = False
         super().__init__(default=default, required=required, **kwargs)
 
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: Union[str, Sequence[Any], None],
-        option_string: Optional[str] = None,
-    ) -> None:
+    def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace, values: Union[str, Sequence[Any], None], option_string: Optional[str] = None) -> None:
         setattr(namespace, self.dest, values)
-
 
 class EnvironmentFlag(argparse.Action):
     """Set boolean flag from environment variable."""
@@ -371,13 +293,7 @@ class EnvironmentFlag(argparse.Action):
         self.env = env
         super().__init__(default=default, nargs=0, **kwargs)
 
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: Union[str, Sequence[Any], None],
-        option_string: Optional[str] = None,
-    ) -> None:
+    def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace, values: Union[str, Sequence[Any], None], option_string: Optional[str] = None) -> None:
         setattr(namespace, self.dest, True)
 
     @staticmethod
